@@ -22,6 +22,7 @@ type ConnStruct struct {
 	Conn *net.Conn
 	ID   int64
 	Addr string
+	Lock *sync.Mutex
 }
 
 var connMapID map[int64]*ConnStruct
@@ -46,20 +47,37 @@ func Add(addr string, id int64, conn *net.Conn) (connRet *ConnStruct, err error)
 		Conn: conn,
 		ID:   id,
 		Addr: addr,
+		Lock: new(sync.Mutex),
 	}
 	connMapID[id] = connRet
 	connMapAddr[addr] = connRet
+	util.Mylog.Debug(connRet)
 
+	return
+}
+func Remove(id int64) {
+	conn, ok := connMapID[id]
+	if !ok {
+		util.Mylog.Debug("连接ID编号不存在！")
+		return
+	}
+	util.Mylog.Debug("删除：", *conn)
+	conn.Lock.Lock()
+	delete(connMapID, id)
+	delete(connMapAddr, conn.Addr)
+	conn.Lock.Unlock()
 	return
 }
 
 func GetByID(id int64) (connRet *ConnStruct, okRet bool) {
 	if v, ok := connMapID[id]; ok {
 		connRet = v
+		okRet = true
 		return
+	} else {
+		util.Mylog.Debug("没找到,V:", v)
 	}
 
-	util.Mylog.Debug("没找到")
 	okRet = false
 
 	return

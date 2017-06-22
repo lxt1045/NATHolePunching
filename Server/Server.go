@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strings"
 	"sync"
 	//	"sync/atomic"
 	"time"
@@ -25,9 +26,10 @@ func init() {
 }
 
 //建立TCP连接
-func TCPSocketServer(addr string) {
+func TCPSocketServer(proto, addr string) {
 	//建立socket，监听端口
-	netListen, err := net.Listen("tcp", addr)
+	log.Debug(addr, " before Listen")
+	netListen, err := net.Listen(proto, addr)
 	if err != nil {
 		log.Errorf("Fatal error: %s", err.Error())
 		return
@@ -38,6 +40,7 @@ func TCPSocketServer(addr string) {
 	for {
 		conn, err := netListen.Accept()
 		if err != nil {
+			log.Error(err)
 			continue
 		}
 		id++
@@ -48,108 +51,169 @@ func TCPSocketServer(addr string) {
 	}
 }
 
-func Read(conn *net.Conn, buffer []byte) (l, t int, errRet error) {
-	//读取长度
-	n, err := (*conn).Read(header)
-	if err != nil {
-		log.Debugf("connection error:%s", err.Error())
-		errRet = err
-		return
+func doConnect(conn *net.Conn, typeBody int8, id int64, bufRec []byte, lenBody int) {
+	//|ID:8 Byte|--|Password:n Byte|
+	cts := util.ConnectToServer{}
+	for i := 0; i < 8; i++ {
+		cts.ID = cts.ID << 8
+		cts.ID = cts.ID | int64(bufRec[i])
 	}
-	if n != 8 {
-		//读取出错
-		log.Debug("socket read error")
-		return
-	}
-	if string(header[5:]) != "LXT" {
-		//校验出错
-		log.Debug("Checksum error")
-		return
-	}
-	//读取主体
-	n1, err := (*conn).Read(buffer)
-	if err != nil {
-		log.Debugf("connection error:%s", err.Error())
-		errRet = err
-		return
-	}
-	log.Debugf("IP:%s, receive data string:%s\n", (*conn).RemoteAddr().String(), string(buffer[:n1]))
+	cts.Password = bufRec[8:]
 
-	lenBody := int(header[0])*0x1000000 + int(header[1])*0x10000 + int(header[2])*0x100 + int(header[3])
-	if lenBody <= 0 || lenBody > len(buffer) || lenBody != n1 {
-		log.Debug("socket data error")
+	connFrom, ok := dao.GetByID(id)
+	if !ok {
+		log.Error("connFrom ID is not Exist")
+		return
+	}
+	connTo, ok := dao.GetByID(cts.ID)
+	if !ok {
+		log.Error("connTo ID is not Exist")
 		return
 	}
 
-	typeBody := int(header[4])
+	//log.Infof("Src:%v, Connect To :%v", (*conn).RemoteAddr().String(), (*connTo.Conn).RemoteAddr().String())
+	log.Infof("Src:%v, \n Connect To :%v", connFrom, connTo)
 
-	return lenBody, typeBody, nil
+	addrFrom := strings.Split(connFrom.Addr, ":")
+	if len(addrFrom) != 2 {
+		log.Error("connFrom.Addr, err:", connFrom.Addr)
+		return
+	}
+
+	ctc := util.ConnectToClient{
+		IP:       util.InetAddr(addrFrom[0]),
+		Port:     util.InetPort(addrFrom[1]),
+		ID:       cts.ID,
+		Password: cts.Password,
+	}
+	log.Debug(addrFrom, "---", ctc)
+
+	bufSend := make([]byte, 0, 32)
+	bufSend = append(bufSend, ctc.IP[:]...)
+
+	bufSend = append(bufSend, byte((ctc.Port>>8)&0xff))
+	bufSend = append(bufSend, byte(ctc.Port&0xff))
+
+	bytesID := []byte{
+		byte((ctc.ID >> 56) & 0xff),
+		byte((ctc.ID >> 48) & 0xff),
+		byte((ctc.ID >> 40) & 0xff),
+		byte((ctc.ID >> 32) & 0xff),
+		byte((ctc.ID >> 24) & 0xff),
+		byte((ctc.ID >> 16) & 0xff),
+		byte((ctc.ID >> 8) & 0xff),
+		byte(ctc.ID & 0xff),
+		//byte(typeB),
+	}
+	bufSend = append(bufSend, bytesID...)
+	bufSend = append(bufSend, bufRec[:lenBody]...)
+	util.SendWithLock(connFrom.Lock, connTo.Conn, bufSend, typeBody)
+
+	//给源发送连接请求
+	{
+		addrTo := strings.Split(connTo.Addr, ":")
+		if len(addrTo) != 2 {
+			log.Error("connTo.Addr, err:", connTo.Addr)
+			return
+		}
+
+		ctc := util.ConnectToClient{
+			IP:       util.InetAddr(addrTo[0]),
+			Port:     util.InetPort(addrTo[1]),
+			ID:       cts.ID,
+			Password: cts.Password,
+		}
+		log.Debug(addrTo, "---", ctc)
+
+		bufSend := make([]byte, 0, 32)
+		bufSend = append(bufSend, ctc.IP[:]...)
+
+		bufSend = append(bufSend, byte((ctc.Port>>8)&0xff))
+		bufSend = append(bufSend, byte(ctc.Port&0xff))
+
+		bufSend = append(bufSend, bytesID...)
+		bufSend = append(bufSend, bufRec[:lenBody]...)
+		util.SendWithLock(connTo.Lock, connFrom.Conn, bufSend, typeBody)
+
+	}
+	return
 }
 func afterAccept(conn *net.Conn, id int64) {
+	//把连接存起来，以后就可以使用了
 	clientAddr := (*conn).RemoteAddr()
 	connRet, err := dao.Add(clientAddr.String(), id, conn)
 	if err != nil {
 		log.Error(err)
 		return
 	}
+	_ = connRet
 
 	log.Debug("建立通信，开始处理！")
+	//发送Client的ID
+	{
+		log.Infof("Send ID")
+		bufSend := []byte{
+			byte((id >> 56) & 0xff),
+			byte((id >> 48) & 0xff),
+			byte((id >> 40) & 0xff),
+			byte((id >> 32) & 0xff),
+			byte((id >> 24) & 0xff),
+			byte((id >> 16) & 0xff),
+			byte((id >> 8) & 0xff),
+			byte(id & 0xff),
+			//byte(typeB),
+		}
+		util.SendWithLock(connRet.Lock, connRet.Conn, bufSend, util.ID)
+	}
 
-	buffer := make([]byte, 256)
-	//自定义Socket头，一共8Byte： ----[4byte长度] ----[1byte类型，3byte纠错标识符："LXT"]
-	header := make([]byte, 8)
-
+	bufRec := make([]byte, 256)
 	for {
-		//读取长度
-		n, err := (*conn).Read(header)
-		if err != nil {
-			log.Debugf("connection error:%s", err.Error())
-			break
+		lenBody, typeBody, e := util.Receive(conn, bufRec)
+		if e != nil {
+			log.Error(e)
+			//断开连接了，所以删除。。。
+			if e.Error() == "EOF" {
+				(*conn).Close()
+				dao.Remove(id)
+			} else {
+				log.Error(",,,,")
+			}
+			return
 		}
-		if n != 8 {
-			//读取出错
-			log.Debug("socket read error")
+		if lenBody == 0 || typeBody == 0 {
 			continue
 		}
-		if string(header[5:]) != "LXT" {
-			//校验出错
-			log.Debug("Checksum error")
-			continue
-		}
-		//读取主体
-		n1, err := (*conn).Read(buffer)
-		if err != nil {
-			log.Debugf("connection error:%s", err.Error())
-			break
-		}
-		log.Debugf("IP:%s, receive data string:%s\n", (*conn).RemoteAddr().String(), string(buffer[:n1]))
-
-		lenBody := int(header[0])*0x1000000 + int(header[1])*0x10000 + int(header[2])*0x100 + int(header[3])
-		if lenBody <= 0 || lenBody > len(buffer) || lenBody != n1 {
-			log.Debug("socket data error")
-			continue
-		}
-
-		//以下根据类型调用rpc
-		typeBody := int(header[4])
 
 		//心跳包
 		if typeBody == util.HEART_BEAT {
-			log.Infof("HeartBeat,data:%s", string(buffer[:lenBody]))
+			log.Infof("HeartBeat,data:%s", string(bufRec[:lenBody]))
 			continue
 		}
 
 		//Client通知Server需要向某个ID发起连接：C-->S
 		//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
 		if typeBody == util.CONNECT {
-			log.Infof("CONNECT,data:%s", string(buffer[:lenBody]))
-			continue
+			doConnect(conn, typeBody, id, bufRec, lenBody)
 		}
 
 		//通知Server，Client需要获取自己的ID：C-->S
 		//通知Client，这是你的ID：S-->C
 		if typeBody == util.ID {
-			log.Infof("ID,data:%s", string(buffer[:lenBody]))
+			log.Infof("ID,data:%s", string(bufRec[:lenBody]))
+
+			bufSend := []byte{
+				byte((id >> 56) & 0xff),
+				byte((id >> 48) & 0xff),
+				byte((id >> 40) & 0xff),
+				byte((id >> 32) & 0xff),
+				byte((id >> 24) & 0xff),
+				byte((id >> 16) & 0xff),
+				byte((id >> 8) & 0xff),
+				byte(id & 0xff),
+				//byte(typeB),
+			}
+
+			util.Send(conn, bufSend, util.ID)
 			continue
 		}
 
@@ -162,34 +226,11 @@ func afterAccept(conn *net.Conn, id int64) {
 }
 
 //处理连接
-func send2Client(conn *net.Conn, body string, typeB int32) {
-	if conn == nil {
-		return
-	}
-
-	lenBody := int32(len(body))
-	//自定义Socket头： ----[4byte长度] ----[1byte类型，3byte纠错标识符："LXT"]
-	header := []byte{
-		byte((lenBody >> 24) & 0xff),
-		byte((lenBody >> 16) & 0xff),
-		byte((lenBody >> 8) & 0xff),
-		byte(lenBody & 0xff),
-		byte(typeB),
-		'L',
-		'X',
-		'T',
-	}
-	//lockSend.Lock()
-
-	(*conn).Write(header)
-	(*conn).Write([]byte(body))
-
-	//lockSend.Unlock()
-}
 
 func main() {
-	log.Debug("start")
+	log.Debug("start:", util.CfgNet.Proto, "  ", util.CfgNet.Addr)
 	//TCP监听
-	TCPSocketServer(":8082")
+	TCPSocketServer(util.CfgNet.Proto, util.CfgNet.Addr)
 
+	log.Flush()
 }

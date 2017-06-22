@@ -9,21 +9,61 @@ import (
 	"github.com/cihub/seelog"
 )
 
-const (
-	HEART_BEAT = 1 //心跳包：C-->S
+var CfgNet struct {
+	Addr  string `toml:"addr"`  // 日志配置文件的路径
+	Proto string `toml:"proto"` // 日志配置文件的路径
 
-	//Client通知Server需要向某个ID发起连接：C-->S
-	//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
-	CONNECT = 2
-
-	//通知Server，Client需要获取自己的ID：C-->S
-	//通知Client，这是你的ID：S-->C
-	ID = 3
-)
+	ServerIP   string `toml:"server_ip"`
+	ServerPort int    `toml:"server_port"`
+}
 
 func init() {
 	sections, meta := initConf()
 	initLog(sections, meta)
+	initNet(sections, meta)
+}
+
+// init 包初始化
+func initConf() (sections map[string]toml.Primitive, meta toml.MetaData) {
+	// 用于记录服务配置信息的变量
+	var file toml.Primitive
+	//var sections map[string]toml.Primitive
+	//var meta toml.MetaData
+
+	// 配置文件名称
+	fileName := "config.conf"
+
+	// 解析命令行参数
+	flagFile := flag.String("conf", "", "configuration file Name")
+	flag.Parse()
+	if *flagFile != "" {
+		fileName = *flagFile
+	}
+
+	// 判断配置文件是否存在
+	if _, err := os.Stat(fileName); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("configuration file %s does not exist.\r\n", fileName)
+		} else {
+			fmt.Printf("configuration file %s execption:%s\r\n", fileName, err.Error())
+		}
+		fileName = ""
+		return
+	}
+
+	// 加载配置文件
+	if fileName != "" {
+		var err error
+		if meta, err = toml.DecodeFile(fileName, &file); err != nil {
+			panic(fmt.Errorf("load configuration file %s failed:%s", fileName, err.Error()))
+		}
+		if err = meta.PrimitiveDecode(file, &sections); err != nil {
+			panic(fmt.Errorf("load configuration file %s failed:%s", fileName, err.Error()))
+		}
+	}
+	fmt.Printf("load configuration file %s succeed.\r\n", fileName)
+
+	return
 }
 
 func initLog(sections map[string]toml.Primitive, meta toml.MetaData) {
@@ -72,47 +112,33 @@ func initLog(sections map[string]toml.Primitive, meta toml.MetaData) {
 	}
 }
 
-// init 包初始化
-func initConf() (sections map[string]toml.Primitive, meta toml.MetaData) {
-	// 用于记录服务配置信息的变量
-	var file toml.Primitive
-	//var sections map[string]toml.Primitive
-	//var meta toml.MetaData
+func initNet(sections map[string]toml.Primitive, meta toml.MetaData) {
 
-	// 配置文件名称
-	fileName := "config.conf"
-
-	// 解析命令行参数
-	flagFile := flag.String("conf", "", "configuration file Name")
-	flag.Parse()
-	if *flagFile != "" {
-		fileName = *flagFile
-	}
-
-	// 判断配置文件是否存在
-	if _, err := os.Stat(fileName); err != nil {
-		if os.IsNotExist(err) {
-			fmt.Printf("configuration file %s does not exist.\r\n", fileName)
-		} else {
-			fmt.Printf("configuration file %s execption:%s\r\n", fileName, err.Error())
-		}
-		fileName = ""
-		return
-	}
-
-	// 加载配置文件
-	if fileName != "" {
-		var err error
-		if meta, err = toml.DecodeFile(fileName, &file); err != nil {
-			panic(fmt.Errorf("load configuration file %s failed:%s", fileName, err.Error()))
-		}
-		if err = meta.PrimitiveDecode(file, &sections); err != nil {
-			panic(fmt.Errorf("load configuration file %s failed:%s", fileName, err.Error()))
+	// 加载配置文件中的值
+	var sectionName = "net"
+	if section, ok := sections[sectionName]; ok {
+		if err := meta.PrimitiveDecode(section, &CfgNet); err != nil {
+			seelog.Error("配置文件出错：", err)
+			return
 		}
 	}
-	fmt.Printf("load configuration file %s succeed.\r\n", fileName)
 
-	return
+	if CfgNet.Addr == "" {
+		seelog.Error("CfgNet.Addr in nil")
+		CfgNet.Addr = ":8082"
+	}
+	if CfgNet.Proto == "" {
+		seelog.Error("CfgNet.Proto in nil")
+		CfgNet.Proto = "tcp"
+	}
+	if CfgNet.ServerIP == "" {
+		seelog.Error("CfgNet.ServerIP in nil")
+		CfgNet.ServerIP = "119.23.142.85"
+	}
+	if CfgNet.ServerPort == 0 {
+		seelog.Error("CfgNet.ServerPort in nil")
+		CfgNet.ServerPort = 8082
+	}
 }
 
 type MylogStruct struct {
