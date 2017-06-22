@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,9 +42,9 @@ func Listen(proto string, addr string) {
 		log.Error(err)
 		return
 	}
-	util.Listen(socket, func(conn *net.Conn) (err error) {
+	err = util.Listen(socket, func(conn *net.Conn) (err error) {
 
-		buffer := make([]byte, 204800)
+		buffer := make([]byte, 2048)
 
 		for {
 			lenBody, typeBody, e := util.Receive(conn, buffer)
@@ -48,53 +52,82 @@ func Listen(proto string, addr string) {
 				log.Error(e)
 				return
 			}
-			log.Debugf("get date:%s,typeBody:%d", string(buffer[:lenBody]), typeBody)
+			log.Debugf("Receive:%s,type:%d", string(buffer[:lenBody]), typeBody)
 
 			if lenBody == 0 || typeBody == 0 {
 				continue
 			}
 
 			//心跳包
-			if typeBody == 8 {
+			if typeBody == util.HEART_BEAT {
 				log.Infof("HeartBeat,data:%s", string(buffer[:lenBody]))
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		log.Error(err)
+	}
 }
 
-//try==true：被动连前的“探路”
-func ConnectServer(proto string, addr string, addrTo string, portTo int, scout bool) {
-	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d, scout:%t", proto, addr, addrTo, portTo, scout)
+func doP2PConnect(bufRec []byte, lenBody int, proto string, addr string) {
+	log.Infof("CONNECT,data:%s", string(bufRec[:lenBody]))
+
+	ctc := util.ConnectToClient{
+		//IP:   [4]byte(bufRec[:4]),
+		//ID:       cts.ID,
+		Port:     (uint16(bufRec[4]) << 8) | (uint16(bufRec[5])),
+		Password: bufRec[4+2+8:],
+	}
+	strIP := fmt.Sprintf("%d.%d.%d.%d", bufRec[0], bufRec[1], bufRec[2], bufRec[3])
+	for i := 0; i < len(ctc.IP); i++ {
+		ctc.IP[i] = bufRec[i]
+	}
+	for i := 0; i < 8; i++ {
+		ctc.ID = ctc.ID << 8
+		ctc.ID = ctc.ID | int64(bufRec[4+2+i])
+	}
+
+	log.Debugf("connect to: %s : %d", strIP, ctc.Port)
+	if ClienID == 0 || ctc.ID != ClienID {
+		//自己主动发起的连接
+		time.Sleep(1 * time.Second)
+		ConnectClient(proto, addr, strIP, int(ctc.Port))
+	} else if ctc.ID == ClienID {
+		//给对方“铺路”
+		time.Sleep(1 * time.Second)
+		ConnectClient(proto, addr, strIP, int(ctc.Port))
+	}
+}
+
+func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRet *net.Conn, errRet error) {
+	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d", proto, addr, addrTo, portTo)
 
 	socket, err := util.Socket(proto, addr)
 	if err != nil {
 		log.Error(err)
+		errRet = err
 		return
 	}
 	conn, err := util.Connect(socket, util.InetAddr(addrTo), portTo)
 	if err != nil {
 		log.Error(err)
+		errRet = err
 		return
 	}
-	log.Debug("after conneted:", (*conn).RemoteAddr().String())
-
-	defer (*conn).Close()
-	if scout {
-		return
-	}
+	log.Debug("Server conneted, RemoteAddr:%s, LocalAddr:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
 
 	connClient = conn
-	bufRec := make([]byte, 256)
-	_ = bufRec
 
 	//接收
 	go func() {
+		bufRec := make([]byte, 256)
+		_ = bufRec
 		for {
-			log.Debug("before Receive")
 			lenBody, typeBody, e := util.Receive(conn, bufRec)
 			if e != nil {
 				log.Error(e)
+				errRet = e
 				return
 			}
 			if lenBody == 0 || typeBody == 0 {
@@ -104,35 +137,7 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int, scout b
 			//Client通知Server需要向某个ID发起连接：C-->S
 			//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
 			if typeBody == util.CONNECT {
-				log.Infof("CONNECT,data:%s", string(bufRec[:lenBody]))
-
-				ctc := util.ConnectToClient{
-					//IP:   [4]byte(bufRec[:4]),
-					Port: (uint16(bufRec[4]) << 8) | (uint16(bufRec[5])),
-					//ID:       cts.ID,
-					Password: bufRec[4+2+8:],
-				}
-				strIP := fmt.Sprintf("%d.%d.%d.%d", bufRec[0], bufRec[1], bufRec[2], bufRec[3])
-
-				log.Debug("connect to: %s : %d", strIP, ctc.Port)
-
-				for i := 0; i < len(ctc.IP); i++ {
-					ctc.IP[i] = bufRec[i]
-				}
-				for i := 0; i < 8; i++ {
-					ctc.ID = ctc.ID << 8
-					ctc.ID = ctc.ID | int64(bufRec[4+2+i])
-				}
-				if ClienID == 0 || ctc.ID != ClienID {
-					//自己主动发起的连接
-					time.Sleep(1 * time.Second)
-					ConnectClient(proto, addr, strIP, int(ctc.Port), false)
-				} else if ctc.ID == ClienID {
-					//给对方“铺路”
-					time.Sleep(1 * time.Second)
-					ConnectClient(proto, addr, strIP, int(ctc.Port), true)
-				}
-
+				doP2PConnect(bufRec, lenBody, proto, addr)
 				continue
 			}
 
@@ -158,62 +163,39 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int, scout b
 	}()
 
 	//发送：NAT 一般 20s 断开映射
-	tickerSchedule := time.NewTicker(18 * time.Second)
-	tickerSchedule1 := time.NewTicker(3 * time.Second)
-	bufHeartBeat := []byte("Keep-alive")
-	for {
-		log.Debug("before HeartBeat")
-		select {
-		case <-tickerSchedule.C:
-			log.Info("HeartBeat,data:", bufHeartBeat)
-			util.SendWithLock(lockSend, conn, bufHeartBeat, util.HEART_BEAT)
-		case <-tickerSchedule1.C:
-			tickerSchedule1.Stop()
+	go func() {
+		tickerSchedule := time.NewTicker(18 * time.Second)
+		tickerSchedule1 := time.NewTicker(3 * time.Second)
+		bufHeartBeat := []byte("Keep-alive")
+		for {
+			select {
+			case <-tickerSchedule.C:
+				log.Info("HeartBeat,data:", bufHeartBeat)
+				util.SendWithLock(lockSend, conn, bufHeartBeat, util.HEART_BEAT)
+			case <-tickerSchedule1.C:
+				tickerSchedule1.Stop()
 
-			//|ID:8 Byte|--|Password:n Byte|
-			cts := util.ConnectToServer{
-				ID:       1,
-				Password: []byte("password"),
+			case <-chEnd:
+				tickerSchedule.Stop()
+				log.Info("terminate!")
+				log.Flush()
+				return
 			}
-			bytesID := []byte{
-				byte((cts.ID >> 56) & 0xff),
-				byte((cts.ID >> 48) & 0xff),
-				byte((cts.ID >> 40) & 0xff),
-				byte((cts.ID >> 32) & 0xff),
-				byte((cts.ID >> 24) & 0xff),
-				byte((cts.ID >> 16) & 0xff),
-				byte((cts.ID >> 8) & 0xff),
-				byte(cts.ID & 0xff),
-				//byte(typeB),
-			}
-			bufSend := make([]byte, 0, 32)
-			bufSend = append(bufSend, bytesID...)
-			bufSend = append(bufSend, cts.Password...)
 
-			//
-			log.Infof("ConnectToServer,ID:%d,Password:%s", cts.ID, string(cts.Password))
-			util.SendWithLock(lockSend, conn, bufSend, util.CONNECT)
-
-		case <-chEnd:
-			tickerSchedule.Stop()
-			log.Info("terminate!")
-			log.Flush()
-			return
 		}
+	}()
 
-	}
+	return conn, nil
 }
 
-//try==true：被动连前的“探路”
-func ConnectClient(proto string, addr string, addrTo string, portTo int, scout bool) {
-	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d, scout:%t", proto, addr, addrTo, portTo, scout)
+func ConnectClient(proto string, addr string, addrTo string, portTo int) {
+	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d", proto, addr, addrTo, portTo)
 
 	socket, err := util.Socket(proto, addr)
 	if err != nil {
 		log.Error("Socket err:", err)
 		return
 	}
-
 	conn, err := util.Connect(socket, util.InetAddr(addrTo), portTo)
 	if err != nil {
 		log.Error("ConnectClient: ", err)
@@ -222,9 +204,6 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int, scout b
 	log.Debug("after connected,RemoteAddr:%s,Local:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
 
 	defer (*conn).Close()
-	if scout {
-		return
-	}
 
 	bufRec := make([]byte, 256)
 	_ = bufRec
@@ -280,17 +259,59 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int, scout b
 	}
 }
 
-func main() {
-	//log.Debug("start")
-	//TCP监听
+func sendConnect(conn *net.Conn, id int64) {
+	//|ID:8 Byte|--|Password:n Byte|
+	cts := util.ConnectToServer{
+		ID:       id,
+		Password: []byte("password"),
+	}
+	bytesID := []byte{
+		byte((cts.ID >> 56) & 0xff),
+		byte((cts.ID >> 48) & 0xff),
+		byte((cts.ID >> 40) & 0xff),
+		byte((cts.ID >> 32) & 0xff),
+		byte((cts.ID >> 24) & 0xff),
+		byte((cts.ID >> 16) & 0xff),
+		byte((cts.ID >> 8) & 0xff),
+		byte(cts.ID & 0xff),
+		//byte(typeB),
+	}
+	bufSend := make([]byte, 0, 32)
+	bufSend = append(bufSend, bytesID...)
+	bufSend = append(bufSend, cts.Password...)
 
+	log.Infof("SendToServer,ID:%d,Password:%s", cts.ID, string(cts.Password))
+	util.SendWithLock(lockSend, conn, bufSend, util.CONNECT)
+}
+func main() {
 	log.Debug("Listen:", util.CfgNet.Proto, ",", util.CfgNet.Addr)
 	go Listen(util.CfgNet.Proto, util.CfgNet.Addr)
 
-	//time.Sleep(3 * time.Second)
+	log.Debug("ConnectServer:", util.CfgNet.Proto, ",", util.CfgNet.ServerIP, ":", util.CfgNet.ServerPort)
+	conn, err := ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, util.CfgNet.ServerIP, util.CfgNet.ServerPort)
+	if err != nil {
+		log.Error(err)
+	}
+	defer (*conn).Close()
 
-	log.Debug("ConnectServer:", util.CfgNet.Proto, ",", util.CfgNet.Addr)
-	//ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, "192.168.3.91", 8082, false)
-	ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, util.CfgNet.ServerIP, util.CfgNet.ServerPort, false)
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		strBytes, _, err := reader.ReadLine()
+		if err != nil {
+			log.Error(err)
+		}
+		params := strings.Split(string(strBytes), " ")
+		if len(params) < 2 {
+			continue
+		}
+		switch params[0] {
+		case "connect":
+			id, err := strconv.ParseInt(params[1], 16, 64)
+			if err != nil {
+				continue
+			}
+			sendConnect(conn, id)
+		}
 
+	}
 }

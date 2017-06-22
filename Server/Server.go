@@ -107,7 +107,7 @@ func doConnect(conn *net.Conn, typeBody int8, id int64, bufRec []byte, lenBody i
 	}
 	bufSend = append(bufSend, bytesID...)
 	bufSend = append(bufSend, bufRec[:lenBody]...)
-	util.SendWithLock(connFrom.Lock, connTo.Conn, bufSend, typeBody)
+	//util.SendWithLock(connFrom.Lock, connTo.Conn, bufSend, typeBody)
 
 	//给源发送连接请求
 	{
@@ -136,6 +136,9 @@ func doConnect(conn *net.Conn, typeBody int8, id int64, bufRec []byte, lenBody i
 		util.SendWithLock(connTo.Lock, connFrom.Conn, bufSend, typeBody)
 
 	}
+	time.Sleep(3 * time.Second)
+
+	util.SendWithLock(connFrom.Lock, connTo.Conn, bufSend, typeBody)
 	return
 }
 func afterAccept(conn *net.Conn, id int64) {
@@ -213,7 +216,8 @@ func afterAccept(conn *net.Conn, id int64) {
 				//byte(typeB),
 			}
 
-			util.Send(conn, bufSend, util.ID)
+			//util.Send(conn, bufSend, util.ID)
+			util.SendWithLock(connRet.Lock, connRet.Conn, bufSend, util.ID)
 			continue
 		}
 
