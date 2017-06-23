@@ -28,7 +28,7 @@ func init() {
 //建立TCP连接
 func TCPSocketServer(proto, addr string) {
 	//建立socket，监听端口
-	log.Debug(addr, " before Listen")
+	log.Debug(addr, "Listening")
 	netListen, err := net.Listen(proto, addr)
 	if err != nil {
 		log.Errorf("Fatal error: %s", err.Error())
@@ -107,7 +107,7 @@ func doConnect(conn *net.Conn, typeBody int8, id int64, bufRec []byte, lenBody i
 	}
 	bufSend = append(bufSend, bytesID...)
 	bufSend = append(bufSend, bufRec[:lenBody]...)
-	//util.SendWithLock(connFrom.Lock, connTo.Conn, bufSend, typeBody)
+	util.SendWithLock(connTo.Lock, connTo.Conn, bufSend, typeBody)
 
 	//给源发送连接请求
 	{
@@ -133,12 +133,12 @@ func doConnect(conn *net.Conn, typeBody int8, id int64, bufRec []byte, lenBody i
 
 		bufSend = append(bufSend, bytesID...)
 		bufSend = append(bufSend, bufRec[:lenBody]...)
-		util.SendWithLock(connTo.Lock, connFrom.Conn, bufSend, typeBody)
+		util.SendWithLock(connFrom.Lock, connFrom.Conn, bufSend, typeBody)
 
 	}
-	time.Sleep(3 * time.Second)
+	//time.Sleep(3 * time.Second)
 
-	util.SendWithLock(connFrom.Lock, connTo.Conn, bufSend, typeBody)
+	//util.SendWithLock(connFrom.Lock, connTo.Conn, bufSend, typeBody)
 	return
 }
 func afterAccept(conn *net.Conn, id int64) {
@@ -233,6 +233,8 @@ func afterAccept(conn *net.Conn, id int64) {
 
 func main() {
 	log.Debug("start:", util.CfgNet.Proto, "  ", util.CfgNet.Addr)
+
+	go TCPSocketServer(util.CfgNet.Proto, ":8088")
 	//TCP监听
 	TCPSocketServer(util.CfgNet.Proto, util.CfgNet.Addr)
 

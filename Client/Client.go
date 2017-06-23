@@ -89,14 +89,23 @@ func doP2PConnect(bufRec []byte, lenBody int, proto string, addr string) {
 	}
 
 	log.Debugf("connect to: %s : %d", strIP, ctc.Port)
-	if ClienID == 0 || ctc.ID != ClienID {
-		//自己主动发起的连接
-		time.Sleep(1 * time.Second)
-		ConnectClient(proto, addr, strIP, int(ctc.Port))
-	} else if ctc.ID == ClienID {
-		//给对方“铺路”
-		time.Sleep(1 * time.Second)
-		ConnectClient(proto, addr, strIP, int(ctc.Port))
+
+	for i := 0; i < 10; i++ {
+		if ClienID == 0 || ctc.ID != ClienID {
+			//自己主动发起的连接
+			time.Sleep(1 * time.Second)
+			err := ConnectClient(proto, addr, strIP, int(ctc.Port))
+			if err == nil {
+				break
+			}
+		} else if ctc.ID == ClienID {
+			//给对方“铺路”
+			time.Sleep(1 * time.Second)
+			err := ConnectClient(proto, addr, strIP, int(ctc.Port))
+			if err == nil {
+				break
+			}
+		}
 	}
 }
 
@@ -170,7 +179,7 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 		for {
 			select {
 			case <-tickerSchedule.C:
-				log.Info("HeartBeat,data:", bufHeartBeat)
+				//log.Info("HeartBeat,data:", bufHeartBeat)
 				util.SendWithLock(lockSend, conn, bufHeartBeat, util.HEART_BEAT)
 			case <-tickerSchedule1.C:
 				tickerSchedule1.Stop()
@@ -188,7 +197,7 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 	return conn, nil
 }
 
-func ConnectClient(proto string, addr string, addrTo string, portTo int) {
+func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet error) {
 	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d", proto, addr, addrTo, portTo)
 
 	socket, err := util.Socket(proto, addr)
@@ -199,9 +208,11 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int) {
 	conn, err := util.Connect(socket, util.InetAddr(addrTo), portTo)
 	if err != nil {
 		log.Error("ConnectClient: ", err)
+		util.CloseSocket(socket)
+		errRet = err
 		return
 	}
-	log.Debug("after connected,RemoteAddr:%s,Local:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
+	log.Debugf("after connected,RemoteAddr:%s,Local:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
 
 	defer (*conn).Close()
 
@@ -286,6 +297,8 @@ func sendConnect(conn *net.Conn, id int64) {
 func main() {
 	log.Debug("Listen:", util.CfgNet.Proto, ",", util.CfgNet.Addr)
 	go Listen(util.CfgNet.Proto, util.CfgNet.Addr)
+
+	//ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, util.CfgNet.ServerIP, 8088)
 
 	log.Debug("ConnectServer:", util.CfgNet.Proto, ",", util.CfgNet.ServerIP, ":", util.CfgNet.ServerPort)
 	conn, err := ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, util.CfgNet.ServerIP, util.CfgNet.ServerPort)
