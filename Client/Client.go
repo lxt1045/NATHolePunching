@@ -16,11 +16,8 @@ import (
 var (
 	log      util.MylogStruct
 	lockSend *sync.Mutex
-	local    *time.Location
 
 	ClienID int64
-
-	connClient *net.Conn
 
 	chEnd chan bool
 )
@@ -32,8 +29,6 @@ func init() {
 
 	log = util.Mylog
 
-	local, _ := time.LoadLocation("Asia/Chongqing")
-	_ = local
 }
 
 func Listen(proto string, addr string) {
@@ -70,7 +65,7 @@ func Listen(proto string, addr string) {
 	}
 }
 
-func doP2PConnect(bufRec []byte, lenBody int, proto string, addr string) {
+func doP2PConnect(bufRec []byte, lenBody int, proto string, addrLocal string) {
 	log.Infof("CONNECT,data:%s", string(bufRec[:lenBody]))
 
 	ctc := util.ConnectToClient{
@@ -88,24 +83,15 @@ func doP2PConnect(bufRec []byte, lenBody int, proto string, addr string) {
 		ctc.ID = ctc.ID | int64(bufRec[4+2+i])
 	}
 
-	log.Debugf("connect to: %s : %d", strIP, ctc.Port)
+	log.Debugf("connect from: %s, to: %s : %d", addrLocal, strIP, ctc.Port)
 
 	for i := 0; i < 10; i++ {
-		if ClienID == 0 || ctc.ID != ClienID {
-			//自己主动发起的连接
-			time.Sleep(1 * time.Second)
-			err := ConnectClient(proto, addr, strIP, int(ctc.Port))
-			if err == nil {
-				break
-			}
-		} else if ctc.ID == ClienID {
-			//给对方“铺路”
-			time.Sleep(1 * time.Second)
-			err := ConnectClient(proto, addr, strIP, int(ctc.Port))
-			if err == nil {
-				break
-			}
+		err := ConnectClient(proto, addrLocal, strIP, int(ctc.Port))
+		if err == nil {
+			log.Error(err)
+			break
 		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -124,9 +110,7 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 		errRet = err
 		return
 	}
-	log.Debug("Server conneted, RemoteAddr:%s, LocalAddr:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
-
-	connClient = conn
+	log.Debugf("Server conneted, RemoteAddr:%s, LocalAddr:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
 
 	//接收
 	go func() {
@@ -135,8 +119,13 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 		for {
 			lenBody, typeBody, e := util.Receive(conn, bufRec)
 			if e != nil {
-				log.Error(e)
-				errRet = e
+				if e.Error() == "EOF" {
+					(*conn).Close()
+					log.Error("Socket Closed")
+				} else {
+					log.Error(e)
+					errRet = e
+				}
 				return
 			}
 			if lenBody == 0 || typeBody == 0 {
@@ -146,8 +135,14 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 			//Client通知Server需要向某个ID发起连接：C-->S
 			//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
 			if typeBody == util.CONNECT {
-				doP2PConnect(bufRec, lenBody, proto, addr)
-				continue
+				//				//关闭和服务器的连接
+				//				chEnd <- true
+				//				(*conn).Close()
+
+				doP2PConnect(bufRec, lenBody, proto, (*conn).LocalAddr().String())
+
+				return
+				//continue
 			}
 
 			//通知Server，Client需要获取自己的ID：C-->S
@@ -174,23 +169,17 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 	//发送：NAT 一般 20s 断开映射
 	go func() {
 		tickerSchedule := time.NewTicker(18 * time.Second)
-		tickerSchedule1 := time.NewTicker(3 * time.Second)
-		bufHeartBeat := []byte("Keep-alive")
 		for {
 			select {
 			case <-tickerSchedule.C:
 				//log.Info("HeartBeat,data:", bufHeartBeat)
-				util.SendWithLock(lockSend, conn, bufHeartBeat, util.HEART_BEAT)
-			case <-tickerSchedule1.C:
-				tickerSchedule1.Stop()
-
+				util.SendWithLock(lockSend, conn, []byte("Keep-alive"), util.HEART_BEAT)
 			case <-chEnd:
 				tickerSchedule.Stop()
 				log.Info("terminate!")
 				log.Flush()
 				return
 			}
-
 		}
 	}()
 
@@ -212,7 +201,7 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet
 		errRet = err
 		return
 	}
-	log.Debugf("after connected,RemoteAddr:%s,Local:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
+	log.Debugf("connected,RemoteAddr:%s,Local:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
 
 	defer (*conn).Close()
 
@@ -222,13 +211,13 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet
 	//接收
 	go func() {
 		for {
-			log.Debug("before Receive")
 			lenBody, typeBody, e := util.Receive(conn, bufRec)
 			if e != nil {
 				log.Error(e)
 				return
 			}
 			if lenBody == 0 || typeBody == 0 {
+				log.Error("received data len==0")
 				continue
 			}
 			//Client 间相互发消息
@@ -246,18 +235,24 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet
 				log.Info("ID:", ID)
 				continue
 			}
-			log.Infof("data:%s", string(bufRec[:lenBody]))
+			//心跳包
+			if typeBody == util.HEART_BEAT {
+				log.Infof("HeartBeat,from:%s, data:%s", (*conn).RemoteAddr().String(), string(bufRec[:lenBody]))
+				continue
+			}
+			log.Infof("received from:%s, data:%s", (*conn).RemoteAddr().String(), string(bufRec[:lenBody]))
 		}
 	}()
 
 	//发送：NAT 一般 20s 断开映射
-	tickerSchedule := time.NewTicker(3 * time.Second)
+	tickerSchedule := time.NewTicker(8 * time.Second)
 	bufHeartBeat := []byte("Keep-alive")
+	util.SendWithLock(lockSend, conn, bufHeartBeat, util.HEART_BEAT)
+
 	for {
-		log.Debug("before HeartBeat")
 		select {
 		case <-tickerSchedule.C:
-			log.Info("HeartBeat,data:", bufHeartBeat)
+			log.Infof("HeartBeat,from:%s,to:%s,data:%s", (*conn).LocalAddr().String(), (*conn).LocalAddr().String(), string(bufHeartBeat))
 			util.SendWithLock(lockSend, conn, bufHeartBeat, util.HEART_BEAT)
 
 		case <-chEnd:
@@ -270,42 +265,47 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet
 	}
 }
 
-func sendConnect(conn *net.Conn, id int64) {
-	//|ID:8 Byte|--|Password:n Byte|
-	cts := util.ConnectToServer{
-		ID:       id,
-		Password: []byte("password"),
-	}
-	bytesID := []byte{
-		byte((cts.ID >> 56) & 0xff),
-		byte((cts.ID >> 48) & 0xff),
-		byte((cts.ID >> 40) & 0xff),
-		byte((cts.ID >> 32) & 0xff),
-		byte((cts.ID >> 24) & 0xff),
-		byte((cts.ID >> 16) & 0xff),
-		byte((cts.ID >> 8) & 0xff),
-		byte(cts.ID & 0xff),
-		//byte(typeB),
-	}
+func sendConnect(conn *net.Conn, idFrom, idTo int64) (errRet error) {
 	bufSend := make([]byte, 0, 32)
-	bufSend = append(bufSend, bytesID...)
-	bufSend = append(bufSend, cts.Password...)
+	//|idFrom:8 Byte|--|idTo:8 Byte|--|PasswordLen: Byte|---|Password:PasswordLen Byte|
 
-	log.Infof("SendToServer,ID:%d,Password:%s", cts.ID, string(cts.Password))
-	util.SendWithLock(lockSend, conn, bufSend, util.CONNECT)
+	x := uint(56)
+	for i := 0; i < 8; i++ {
+		b := byte((idFrom >> x) & 0xff)
+		bufSend = append(bufSend, b)
+		x -= 8
+	}
+	x = 56
+	for i := 8; i < 16; i++ {
+		b := byte((idTo >> x) & 0xff)
+		bufSend = append(bufSend, b)
+		x -= 8
+	}
+	bufSend = append(bufSend, byte(int8(len("password-test"))))
+	bufSend = append(bufSend, []byte("password-test")...)
+
+	log.Infof("SendToServer,idFrom:%d,idTo:%s", idFrom, idTo)
+	//这里可以连接8088端口，，，aux
+	return util.SendWithLock(lockSend, conn, bufSend, util.CONNECT)
 }
-func main() {
-	log.Debug("Listen:", util.CfgNet.Proto, ",", util.CfgNet.Addr)
-	go Listen(util.CfgNet.Proto, util.CfgNet.Addr)
 
+func main() {
 	//ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, util.CfgNet.ServerIP, 8088)
 
 	log.Debug("ConnectServer:", util.CfgNet.Proto, ",", util.CfgNet.ServerIP, ":", util.CfgNet.ServerPort)
-	conn, err := ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, util.CfgNet.ServerIP, util.CfgNet.ServerPort)
+	//conn, err := ConnectServer(util.CfgNet.Proto, util.CfgNet.Addr, util.CfgNet.ServerIP, util.CfgNet.ServerPort)
+	conn, err := ConnectServer(util.CfgNet.Proto, "", util.CfgNet.ServerIP, util.CfgNet.ServerPort)
 	if err != nil {
 		log.Error(err)
 	}
 	defer (*conn).Close()
+
+	{
+		//log.Debug("Listen:", util.CfgNet.Proto, ",", util.CfgNet.Addr)
+		log.Debug("Listen:", util.CfgNet.Proto, ",", (*conn).LocalAddr().String())
+		go Listen(util.CfgNet.Proto, (*conn).LocalAddr().String())
+
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 	for {
@@ -319,12 +319,61 @@ func main() {
 		}
 		switch params[0] {
 		case "connect":
-			id, err := strconv.ParseInt(params[1], 16, 64)
+			id, err := strconv.ParseInt(params[1], 10, 64)
 			if err != nil {
 				continue
 			}
-			sendConnect(conn, id)
-		}
+			//			if err := sendConnect(conn, ClienID, id); err != nil {
+			//				return
+			//			}
 
+			if err := ConnectServerAndSendConnect(util.CfgNet.Proto, (*conn).LocalAddr().String(), util.CfgNet.ServerIP, 8088, ClienID, id); err != nil {
+				log.Debug(err)
+			}
+		}
 	}
+}
+
+func ConnectServerAndSendConnect(proto string, addr string, addrTo string, portTo int, idFrom, idTo int64) (errRet error) {
+	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d", proto, addr, addrTo, portTo)
+
+	socket, err := util.Socket(proto, addr)
+	if err != nil {
+		log.Error(err)
+		errRet = err
+		return
+	}
+	conn, err := util.Connect(socket, util.InetAddr(addrTo), portTo)
+	if err != nil {
+		log.Error(err)
+		errRet = err
+		return
+	}
+	log.Debugf("Server Aux conneted, RemoteAddr:%s, LocalAddr:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
+
+	//
+	bufSend := make([]byte, 0, 32)
+	//|idFrom:8 Byte|--|idTo:8 Byte|--|PasswordLen: Byte|---|Password:PasswordLen Byte|
+
+	x := uint(56)
+	for i := 0; i < 8; i++ {
+		b := byte((idFrom >> x) & 0xff)
+		bufSend = append(bufSend, b)
+		x -= 8
+	}
+	x = 56
+	for i := 8; i < 16; i++ {
+		b := byte((idTo >> x) & 0xff)
+		bufSend = append(bufSend, b)
+		x -= 8
+	}
+	bufSend = append(bufSend, byte(int8(len("password-test"))))
+	bufSend = append(bufSend, []byte("password-test")...)
+
+	log.Infof("SendToServer,idFrom:%d,idTo:%s", idFrom, idTo)
+	//这里可以连接8088端口，，，aux
+	errRet = util.Send(conn, bufSend, util.CONNECT)
+
+	(*conn).Close()
+	return
 }

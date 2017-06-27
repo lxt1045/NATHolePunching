@@ -3,6 +3,8 @@ package util
 import (
 	"net"
 	"sync"
+	"syscall"
+	"unsafe"
 )
 
 const (
@@ -82,12 +84,71 @@ func SendWithLock(lock *sync.Mutex, conn *net.Conn, buffer []byte, t int8) (errR
 	}
 	lock.Lock()
 
-	if n, err := (*conn).Write(header); n != 8 || err != nil {
-		errRet = err
+	//	if n, err := (*conn).Write(header); n != 8 || err != nil {
+	//		errRet = err
+	//	}
+	//	if n, err := (*conn).Write(buffer); n != int(lenBody) || err != nil {
+	//		errRet = err
+	//	}
+
+	///
+	pConn := *conn
+	{
+		type fdMutex struct {
+			state uint64
+			rsema uint32
+			wsema uint32
+		}
+		type Addr interface {
+			Network() string // name of the network (for example, "tcp", "udp")
+			String() string  // string form of address (for example, "192.0.2.1:25", "[2001:db8::1]:80")
+		}
+		type pollDesc struct {
+			runtimeCtx uintptr
+		}
+		type netFD struct {
+			// locking/lifetime of sysfd + serialize access to Read and Write methods
+			fdmu fdMutex
+
+			// immutable until Close
+			sysfd       int
+			family      int
+			sotype      int
+			isStream    bool
+			isConnected bool
+			net         string
+			laddr       Addr
+			raddr       Addr
+
+			// writev cache.
+			iovecs *[]syscall.Iovec
+
+			// wait server
+			pd pollDesc
+		}
+		type conn struct {
+			fd *netFD
+		}
+		type TCPConn struct {
+			conn
+		}
+
+		var tConn TCPConn
+		//*(*uint64)(unsafe.Pointer(&f))
+		tConn = *(*TCPConn)(unsafe.Pointer(&pConn))
+		Mylog.Debug(tConn.fd.sysfd)
+
+		buffer := make([]byte, 2048)
+		n, e := syscall.Write(tConn.fd.sysfd, header)
+		if e != nil || n != 8 {
+			Mylog.Error("rrrr", n)
+		}
+		n, e = syscall.Write(tConn.fd.sysfd, buffer)
+		if e != nil || n != int(lenBody) {
+			Mylog.Error("rrrr", n)
+		}
 	}
-	if n, err := (*conn).Write(buffer); n != int(lenBody) || err != nil {
-		errRet = err
-	}
+	///
 	lock.Unlock()
 	return
 }

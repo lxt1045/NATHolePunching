@@ -21,12 +21,6 @@ func Socket(proto, addr string) (fd int, err error) {
 		Mylog.Error("tcp != proto")
 		return
 	}
-	tcp, err := net.ResolveTCPAddr(proto, addr)
-	if err != nil && tcp.IP != nil {
-		Mylog.Error(err)
-		return
-	}
-	sockaddr := &syscall.SockaddrInet4{Port: tcp.Port}
 
 	syscall.ForkLock.RLock()
 	if fd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP); err != nil {
@@ -49,13 +43,22 @@ func Socket(proto, addr string) (fd int, err error) {
 	if err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, reusePort, 1); err != nil {
 		return
 	}
-	const SO_REUSEPORT = 0x200
-	if err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, SO_REUSEPORT, 1); err != nil {
-		return
-	}
+	//	const SO_REUSEPORT = 0x200
+	//	if err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, SO_REUSEPORT, 1); err != nil {
+	//		return
+	//	}
 
-	if err = syscall.Bind(fd, sockaddr); err != nil {
-		return
+	if len(addr) > 0 {
+		var tcp *net.TCPAddr
+		tcp, err = net.ResolveTCPAddr(proto, addr)
+		if err != nil && tcp.IP != nil {
+			Mylog.Error(err)
+			return
+		}
+		sockaddr := &syscall.SockaddrInet4{Port: tcp.Port}
+		if err = syscall.Bind(fd, sockaddr); err != nil {
+			return
+		}
 	}
 
 	return
@@ -64,6 +67,7 @@ func CloseSocket(fd int) {
 	if err := syscall.Close(fd); err != nil {
 		Mylog.Error(err)
 	}
+	Mylog.Info("socket closed!")
 	return
 }
 
@@ -154,7 +158,7 @@ func Connect(fd int, addr [4]byte, port int) (conn *net.Conn, err error) {
 	}()
 
 	//有时候连接被远端抛弃的时候， syscall.Connect() 会很久才返回
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(366666666 * time.Second)
 	select {
 	case <-ticker.C:
 		err = fmt.Errorf("Connect timeout")
