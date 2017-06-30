@@ -43,6 +43,10 @@ func Socket(proto, addr string) (fd int, err error) {
 	if err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, reusePort, 1); err != nil {
 		return
 	}
+
+	if err = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_SYNCNT, 1); err != nil {
+		return
+	}
 	//	const SO_REUSEPORT = 0x200
 	//	if err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, SO_REUSEPORT, 1); err != nil {
 	//		return
@@ -151,30 +155,43 @@ func Connect(fd int, addr [4]byte, port int) (conn *net.Conn, err error) {
 		Port: port,
 	}
 
-	chConnect := make(chan error)
-	go func() {
-		err = syscall.Connect(fd, &addrInet4)
-		chConnect <- err
-	}()
+	//	chConnect := make(chan error)
+	//	go func() {
+	//		err = syscall.Connect(fd, &addrInet4)
+	//		chConnect <- err
+	//	}()
 
-	//有时候连接被远端抛弃的时候， syscall.Connect() 会很久才返回
-	ticker := time.NewTicker(366666666 * time.Second)
-	select {
-	case <-ticker.C:
-		err = fmt.Errorf("Connect timeout")
-		return
-	case e := <-chConnect:
-		if e != nil {
-			err = e
-			Mylog.Error("Connect error: ", err)
-			return
-		}
-	}
+	//	//有时候连接被远端抛弃的时候， syscall.Connect() 会很久才返回
+	//	ticker := time.NewTicker(366666666 * time.Second)
+	//	select {
+	//	case <-ticker.C:
+	//		err = fmt.Errorf("Connect timeout")
+	//		return
+	//	case e := <-chConnect:
+	//		if e != nil {
+	//			err = e
+	//			Mylog.Error("Connect error: ", err)
+	//			return
+	//		}
+	//	}
 
 	//	if err = syscall.Connect(fd, &addrInet4); err != nil {
 	//		Mylog.Error("Connect error: ", err)
 	//		return
 	//	}
+
+	err = syscall.Connect(fd, &addrInet4)
+	for i := 0; i < 3 && err != nil; i++ {
+		Mylog.Errorf(" %d times, Connect error:%s ", i, err)
+		if err.Error() == "connection refused" {
+			Mylog.Error("Sleep")
+			time.Sleep(3 * time.Second)
+		}
+		err = syscall.Connect(fd, &addrInet4)
+		if i >= 2 {
+			return
+		}
+	}
 
 	var file *os.File
 	file = os.NewFile(uintptr(fd), fmt.Sprintf("tcpholepunching.%d", time.Now().UnixNano()))

@@ -177,6 +177,7 @@ func afterAcceptAux(conn *net.Conn) {
 			psLen := int(bufRec[16])
 			password := bufRec[17 : 17+psLen]
 			doConnectAux(conn, typeBody, idFrom, idTo, password)
+			break
 		}
 
 	}

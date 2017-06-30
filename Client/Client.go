@@ -20,6 +20,8 @@ var (
 	ClienID int64
 
 	chEnd chan bool
+
+	x bool
 )
 
 func init() {
@@ -85,13 +87,13 @@ func doP2PConnect(bufRec []byte, lenBody int, proto string, addrLocal string) {
 
 	log.Debugf("connect from: %s, to: %s : %d", addrLocal, strIP, ctc.Port)
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 1; i++ {
 		err := ConnectClient(proto, addrLocal, strIP, int(ctc.Port))
 		if err == nil {
 			log.Error(err)
 			break
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(3 * time.Second)
 	}
 }
 
@@ -185,9 +187,35 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 
 	return conn, nil
 }
-
+func DialTimeout(network, localAddr, address string, timeout time.Duration) (net.Conn, error) {
+	ra, err := net.ResolveTCPAddr("tcp4", localAddr)
+	if err != nil {
+		log.Error(err)
+	}
+	d := net.Dialer{
+		Timeout:   timeout,
+		LocalAddr: ra, //net.TCPAddr{},
+	}
+	return d.Dial(network, address)
+}
 func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet error) {
 	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d", proto, addr, addrTo, portTo)
+
+	if false {
+		conn, err := DialTimeout("tcp", addr, fmt.Sprintf("%s:%d", addrTo, portTo), 3*time.Millisecond)
+		if err != nil {
+			log.Error(err.Error())
+			//return err
+		}
+		if conn != nil {
+			go conn.Write([]byte("1234567890"))
+			buf := make([]byte, 12)
+			go conn.Read(buf)
+			log.Debugf("src:%s,dst:%s,data:%s", conn.LocalAddr().String(), conn.RemoteAddr().String(), string(buf))
+			time.Sleep(5 * time.Second)
+			conn.Close()
+		}
+	}
 
 	socket, err := util.Socket(proto, addr)
 	if err != nil {
@@ -319,6 +347,7 @@ func main() {
 		}
 		switch params[0] {
 		case "connect":
+			x = false
 			id, err := strconv.ParseInt(params[1], 10, 64)
 			if err != nil {
 				continue
@@ -327,6 +356,17 @@ func main() {
 			//				return
 			//			}
 
+			if err := ConnectServerAndSendConnect(util.CfgNet.Proto, (*conn).LocalAddr().String(), util.CfgNet.ServerIP, 8088, ClienID, id); err != nil {
+				log.Debug(err)
+			}
+
+			//SendSYNPackage
+		case "to":
+			x = true
+			id, err := strconv.ParseInt(params[1], 10, 64)
+			if err != nil {
+				continue
+			}
 			if err := ConnectServerAndSendConnect(util.CfgNet.Proto, (*conn).LocalAddr().String(), util.CfgNet.ServerIP, 8088, ClienID, id); err != nil {
 				log.Debug(err)
 			}

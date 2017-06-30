@@ -3,8 +3,8 @@ package util
 import (
 	"net"
 	"sync"
-	"syscall"
-	"unsafe"
+	//	"syscall"
+	//	"unsafe"
 )
 
 const (
@@ -84,14 +84,14 @@ func SendWithLock(lock *sync.Mutex, conn *net.Conn, buffer []byte, t int8) (errR
 	}
 	lock.Lock()
 
-	//	if n, err := (*conn).Write(header); n != 8 || err != nil {
-	//		errRet = err
-	//	}
-	//	if n, err := (*conn).Write(buffer); n != int(lenBody) || err != nil {
-	//		errRet = err
-	//	}
+	if n, err := (*conn).Write(header); n != 8 || err != nil {
+		errRet = err
+	}
+	if n, err := (*conn).Write(buffer); n != int(lenBody) || err != nil {
+		errRet = err
+	}
 
-	///
+	/*//
 	pConn := *conn
 	{
 		type fdMutex struct {
@@ -148,7 +148,7 @@ func SendWithLock(lock *sync.Mutex, conn *net.Conn, buffer []byte, t int8) (errR
 			Mylog.Error("rrrr", n)
 		}
 	}
-	///
+	//*/
 	lock.Unlock()
 	return
 }
