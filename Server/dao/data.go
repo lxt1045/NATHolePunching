@@ -19,10 +19,11 @@ var local *time.Location
 var currentID int64
 
 type ConnStruct struct {
-	Conn *net.Conn
-	ID   int64
-	Addr string
-	Lock *sync.Mutex
+	Conn       *net.Conn
+	ID         int64
+	Addr       string
+	Lock       *sync.Mutex
+	ClientType int32 //0： 默认类型； 1：处于外网；2：IP：Port相同则Nat映射端口相同；3:不同不能连接打通
 }
 
 var connMapID map[int64]*ConnStruct

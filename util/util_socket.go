@@ -12,7 +12,12 @@ const (
 
 	//Client通知Server需要向某个ID发起连接：C-->S
 	//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
-	CONNECT = 2
+	CONNECT     = 2
+	CONNECT_DST = 5 //被请求的PC端 发送给Server端
+	CONNECT_SRC = 6 //主动请求的PC端 发送给Server端
+
+	//Client 访问Server的8088端口，以确认Client的NAT类型
+	CONNECT_AUX = 7
 
 	//通知Server，Client需要获取自己的ID：C-->S
 	//通知Client，这是你的ID：S-->C
@@ -26,16 +31,21 @@ func init() {
 
 }
 
+type CreateConn struct {
+	IDFrom, IDTo int64
+	Password     [12]byte
+}
+
 type ConnectToServer struct {
 	ID       int64
-	Password []byte
+	Password [12]byte
 }
 
 type ConnectToClient struct {
 	IP       [4]byte
 	Port     uint16
 	ID       int64
-	Password []byte
+	Password [12]byte
 }
 
 func Send(conn *net.Conn, buffer []byte, t int8) (errRet error) {

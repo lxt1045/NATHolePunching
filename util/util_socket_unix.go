@@ -44,9 +44,22 @@ func Socket(proto, addr string) (fd int, err error) {
 		return
 	}
 
+	//失败后重试次数
 	if err = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_SYNCNT, 1); err != nil {
 		return
 	}
+
+	//	//Send()、Write()之后，直接发出去，不组装小包为大包
+	//
+	//	//对linux
+	//	if err = syscall.SetsockoptInt(fd, syscall.SOL_TCP, syscall.TCP_CORK, 0); err != nil {
+	//		return
+	//	}
+	//	//对BSD,  IPPROTO_TCP和SOL_TCP值一样
+	//	if err = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1); err != nil {
+	//		return
+	//	}
+
 	//	const SO_REUSEPORT = 0x200
 	//	if err = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, SO_REUSEPORT, 1); err != nil {
 	//		return
@@ -181,17 +194,21 @@ func Connect(fd int, addr [4]byte, port int) (conn *net.Conn, err error) {
 	//	}
 
 	err = syscall.Connect(fd, &addrInet4)
-	for i := 0; i < 3 && err != nil; i++ {
-		Mylog.Errorf(" %d times, Connect error:%s ", i, err)
-		if err.Error() == "connection refused" {
-			Mylog.Error("Sleep")
-			time.Sleep(3 * time.Second)
-		}
-		err = syscall.Connect(fd, &addrInet4)
-		if i >= 2 {
-			return
-		}
+	if err != nil {
+		Mylog.Error(err)
+		return
 	}
+	//	for i := 0; i < 3 && err != nil; i++ {
+	//		Mylog.Errorf(" %d times, Connect error:%s ", i, err)
+	//		if err.Error() == "connection refused" {
+	//			Mylog.Error("Sleep")
+	//			time.Sleep(3 * time.Second)
+	//		}
+	//		err = syscall.Connect(fd, &addrInet4)
+	//		if i >= 2 {
+	//			return
+	//		}
+	//	}
 
 	var file *os.File
 	file = os.NewFile(uintptr(fd), fmt.Sprintf("tcpholepunching.%d", time.Now().UnixNano()))

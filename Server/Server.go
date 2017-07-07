@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	//	"sync/atomic"
+	"bytes"
+	"encoding/binary"
 	"time"
 
 	"github.com/lxt1045/TCPHolePunching/Server/dao"
@@ -67,19 +69,13 @@ func afterAccept(conn *net.Conn, id int64, aux bool) {
 	//log.Debug("建立通信，开始处理！")
 	//发送Client的ID
 	{
-		log.Infof("Send ID")
-		bufSend := []byte{
-			byte((id >> 56) & 0xff),
-			byte((id >> 48) & 0xff),
-			byte((id >> 40) & 0xff),
-			byte((id >> 32) & 0xff),
-			byte((id >> 24) & 0xff),
-			byte((id >> 16) & 0xff),
-			byte((id >> 8) & 0xff),
-			byte(id & 0xff),
-			//byte(typeB),
+		log.Infof("Send ID:%d", id)
+		var buffer bytes.Buffer
+		if err := binary.Write(&buffer, binary.BigEndian, id); err != nil {
+			log.Error(err)
+			return
 		}
-		util.SendWithLock(connRet.Lock, connRet.Conn, bufSend, util.ID)
+		util.SendWithLock(connRet.Lock, connRet.Conn, buffer.Bytes(), util.ID)
 	}
 
 	bufRec := make([]byte, 256)
@@ -108,8 +104,15 @@ func afterAccept(conn *net.Conn, id int64, aux bool) {
 
 		//Client通知Server需要向某个ID发起连接：C-->S
 		//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
-		if typeBody == util.CONNECT {
-			doConnect(conn, typeBody, id, bufRec, lenBody)
+		if typeBody == util.CONNECT_DST || typeBody == util.CONNECT_SRC {
+			//按步骤走，先给dst端发送数据包，处理预连接
+			var connInfo util.CreateConn
+			buffer := bytes.NewBuffer(bufRec)
+			if err := binary.Read(buffer, binary.BigEndian, &connInfo); err != nil {
+				log.Error(err)
+				return
+			}
+			doConnect(conn, typeBody, &connInfo)
 		}
 
 		//通知Server，Client需要获取自己的ID：C-->S
@@ -117,20 +120,12 @@ func afterAccept(conn *net.Conn, id int64, aux bool) {
 		if typeBody == util.ID {
 			log.Infof("ID,data:%s", string(bufRec[:lenBody]))
 
-			bufSend := []byte{
-				byte((id >> 56) & 0xff),
-				byte((id >> 48) & 0xff),
-				byte((id >> 40) & 0xff),
-				byte((id >> 32) & 0xff),
-				byte((id >> 24) & 0xff),
-				byte((id >> 16) & 0xff),
-				byte((id >> 8) & 0xff),
-				byte(id & 0xff),
-				//byte(typeB),
+			var buffer bytes.Buffer
+			if err := binary.Write(&buffer, binary.BigEndian, id); err != nil {
+				log.Error(err)
+				continue
 			}
-
-			//util.Send(conn, bufSend, util.ID)
-			util.SendWithLock(connRet.Lock, connRet.Conn, bufSend, util.ID)
+			util.SendWithLock(connRet.Lock, connRet.Conn, buffer.Bytes(), util.ID)
 			continue
 		}
 	}
@@ -161,189 +156,90 @@ func afterAcceptAux(conn *net.Conn) {
 
 		//Client通知Server需要向某个ID发起连接：C-->S
 		//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
-		if typeBody == util.CONNECT {
-
-			//|idFrom:8 Byte|--|idTo:8 Byte|--|PasswordLen: Byte|---|Password:PasswordLen Byte|
-			var idFrom, idTo int64
-
-			for i := 0; i < 8; i++ {
-				idFrom = idFrom << 8
-				idFrom = idFrom | int64(bufRec[i])
+		if typeBody == util.CONNECT_AUX {
+			var id int64
+			buffer := bytes.NewBuffer(bufRec)
+			if err := binary.Read(buffer, binary.BigEndian, &id); err != nil {
+				log.Error(err)
+				return
 			}
-			for i := 8; i < 16; i++ {
-				idTo = idTo << 8
-				idTo = idTo | int64(bufRec[i])
-			}
-			psLen := int(bufRec[16])
-			password := bufRec[17 : 17+psLen]
-			doConnectAux(conn, typeBody, idFrom, idTo, password)
-			break
+
+			doConnectAux(conn, id)
 		}
 
 	}
 }
 
-func doConnectAux(conn *net.Conn, typeBody int8, idFrom, idTo int64, password []byte) {
-	connFrom, ok := dao.GetByID(idFrom)
-	if !ok {
-		log.Error("connFrom ID is not Exist")
-		return
-	}
-	connTo, ok := dao.GetByID(idTo)
-	if !ok {
-		log.Error("connTo ID is not Exist")
+func doConnect(conn *net.Conn, typeBody int8, connInfo *util.CreateConn) {
+	connFrom, ok1 := dao.GetByID(connInfo.IDFrom)
+	connTo, ok2 := dao.GetByID(connInfo.IDTo)
+	if !ok1 || !ok2 {
+		log.Errorf("ID is not Exist,ok1:%t,ok2:%t", ok1, ok2)
 		return
 	}
 
-	//log.Infof("Src:%v, Connect To :%v", (*conn).RemoteAddr().String(), (*connTo.Conn).RemoteAddr().String())
-	log.Infof("Src:%v, \n Connect To :%v", connFrom, connTo)
+	log.Infof("Src:%v, \n Connect To :%v", connFrom.Addr, connTo.Addr)
 
-	addrFrom := strings.Split(connFrom.Addr, ":")
-	if len(addrFrom) != 2 {
-		log.Error("connFrom.Addr, err:", connFrom.Addr)
-		return
-	}
+	if typeBody == util.CONNECT_SRC {
+		addrFrom := strings.Split(connFrom.Addr, ":")
+		if len(addrFrom) != 2 {
+			log.Error("connFrom.Addr, err:", connFrom.Addr)
+			return
+		}
 
-	ctc := util.ConnectToClient{
-		IP:       util.InetAddr(addrFrom[0]),
-		Port:     util.InetPort(addrFrom[1]),
-		ID:       idTo,
-		Password: password,
-	}
+		//主动发情请求的的一方的信息
+		infoFrom := util.ConnectToClient{
+			IP:       util.InetAddr(addrFrom[0]),
+			Port:     util.InetPort(addrFrom[1]),
+			ID:       connInfo.IDFrom,
+			Password: connInfo.Password,
+		}
+		var buffer bytes.Buffer
+		if err := binary.Write(&buffer, binary.BigEndian, infoFrom); err != nil {
+			log.Error(err)
+			return
+		}
+		util.SendWithLock(connTo.Lock, connTo.Conn, buffer.Bytes(), util.CONNECT_DST)
 
-	bufSend := make([]byte, 0, 32)
-	bufSend = append(bufSend, ctc.IP[:]...)
-
-	bufSend = append(bufSend, byte((ctc.Port>>8)&0xff))
-	bufSend = append(bufSend, byte(ctc.Port&0xff))
-
-	bytesID := []byte{
-		byte((ctc.ID >> 56) & 0xff),
-		byte((ctc.ID >> 48) & 0xff),
-		byte((ctc.ID >> 40) & 0xff),
-		byte((ctc.ID >> 32) & 0xff),
-		byte((ctc.ID >> 24) & 0xff),
-		byte((ctc.ID >> 16) & 0xff),
-		byte((ctc.ID >> 8) & 0xff),
-		byte(ctc.ID & 0xff),
-	}
-	bufSend = append(bufSend, bytesID...)
-	bufSend = append(bufSend, password...)
-	util.SendWithLock(connTo.Lock, connTo.Conn, bufSend, typeBody)
-
-	//给源发送连接请求
-	{
+	} else if typeBody == util.CONNECT_DST {
 		addrTo := strings.Split(connTo.Addr, ":")
 		if len(addrTo) != 2 {
 			log.Error("connTo.Addr, err:", connTo.Addr)
 			return
 		}
 
-		ctc := util.ConnectToClient{
+		infoTo := util.ConnectToClient{
 			IP:       util.InetAddr(addrTo[0]),
 			Port:     util.InetPort(addrTo[1]),
-			ID:       idTo,
-			Password: password,
+			ID:       connInfo.IDTo,
+			Password: connInfo.Password,
 		}
 
-		bufSend := make([]byte, 0, 32)
-		bufSend = append(bufSend, ctc.IP[:]...)
-
-		bufSend = append(bufSend, byte((ctc.Port>>8)&0xff))
-		bufSend = append(bufSend, byte(ctc.Port&0xff))
-
-		bufSend = append(bufSend, bytesID...)
-		bufSend = append(bufSend, password...)
-		util.SendWithLock(connFrom.Lock, connFrom.Conn, bufSend, typeBody)
+		var buffer bytes.Buffer
+		if err := binary.Write(&buffer, binary.BigEndian, infoTo); err != nil {
+			log.Error(err)
+			return
+		}
+		util.SendWithLock(connFrom.Lock, connFrom.Conn, buffer.Bytes(), util.CONNECT_SRC)
 
 	}
 	return
 }
 
-func doConnect(conn *net.Conn, typeBody int8, id int64, bufRec []byte, lenBody int) {
-	//|ID:8 Byte|--|Password:n Byte|
-	cts := util.ConnectToServer{}
-	for i := 0; i < 8; i++ {
-		cts.ID = cts.ID << 8
-		cts.ID = cts.ID | int64(bufRec[i])
-	}
-	cts.Password = bufRec[8:]
-
-	connFrom, ok := dao.GetByID(id)
+func doConnectAux(conn *net.Conn, id int64) {
+	connRemote, ok := dao.GetByID(id)
 	if !ok {
-		log.Error("connFrom ID is not Exist")
+		log.Errorf("Addr:%s is not Exist!", (*conn).RemoteAddr().String())
 		return
 	}
-	connTo, ok := dao.GetByID(cts.ID)
-	if !ok {
-		log.Error("connTo ID is not Exist")
-		return
+	connRemote.Lock.Lock()
+	if connRemote.Addr == (*conn).RemoteAddr().String() {
+		connRemote.ClientType = 2
+	} else {
+		log.Errorf("ClientAddr:%s is not same as Addr:%s!", (*conn).RemoteAddr().String(), connRemote.Addr)
+		connRemote.ClientType = 3
 	}
-
-	//log.Infof("Src:%v, Connect To :%v", (*conn).RemoteAddr().String(), (*connTo.Conn).RemoteAddr().String())
-	log.Infof("Src:%v, \n Connect To :%v", connFrom, connTo)
-
-	addrFrom := strings.Split(connFrom.Addr, ":")
-	if len(addrFrom) != 2 {
-		log.Error("connFrom.Addr, err:", connFrom.Addr)
-		return
-	}
-
-	ctc := util.ConnectToClient{
-		IP:       util.InetAddr(addrFrom[0]),
-		Port:     util.InetPort(addrFrom[1]),
-		ID:       cts.ID,
-		Password: cts.Password,
-	}
-	log.Debug(addrFrom, "---", ctc)
-
-	bufSend := make([]byte, 0, 32)
-	bufSend = append(bufSend, ctc.IP[:]...)
-
-	bufSend = append(bufSend, byte((ctc.Port>>8)&0xff))
-	bufSend = append(bufSend, byte(ctc.Port&0xff))
-
-	bytesID := []byte{
-		byte((ctc.ID >> 56) & 0xff),
-		byte((ctc.ID >> 48) & 0xff),
-		byte((ctc.ID >> 40) & 0xff),
-		byte((ctc.ID >> 32) & 0xff),
-		byte((ctc.ID >> 24) & 0xff),
-		byte((ctc.ID >> 16) & 0xff),
-		byte((ctc.ID >> 8) & 0xff),
-		byte(ctc.ID & 0xff),
-		//byte(typeB),
-	}
-	bufSend = append(bufSend, bytesID...)
-	bufSend = append(bufSend, bufRec[:lenBody]...)
-	util.SendWithLock(connTo.Lock, connTo.Conn, bufSend, typeBody)
-
-	//给源发送连接请求
-	{
-		addrTo := strings.Split(connTo.Addr, ":")
-		if len(addrTo) != 2 {
-			log.Error("connTo.Addr, err:", connTo.Addr)
-			return
-		}
-
-		ctc := util.ConnectToClient{
-			IP:       util.InetAddr(addrTo[0]),
-			Port:     util.InetPort(addrTo[1]),
-			ID:       cts.ID,
-			Password: cts.Password,
-		}
-
-		bufSend := make([]byte, 0, 32)
-		bufSend = append(bufSend, ctc.IP[:]...)
-
-		bufSend = append(bufSend, byte((ctc.Port>>8)&0xff))
-		bufSend = append(bufSend, byte(ctc.Port&0xff))
-
-		bufSend = append(bufSend, bytesID...)
-		bufSend = append(bufSend, bufRec[:lenBody]...)
-		util.SendWithLock(connFrom.Lock, connFrom.Conn, bufSend, typeBody)
-
-	}
+	connRemote.Lock.Unlock()
 	return
 }
 
