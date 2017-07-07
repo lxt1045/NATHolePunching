@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -67,33 +69,25 @@ func Listen(proto string, addr string) {
 	}
 }
 
-func doP2PConnect(bufRec []byte, lenBody int, proto string, addrLocal string) {
-	log.Infof("CONNECT,data:%s", string(bufRec[:lenBody]))
+func doP2PConnect(connInfo *util.ConnectToClient, lenBody int, proto string, addrLocal string, connType int8) {
+	log.Infof("CONNECT,data:%v", connInfo)
 
-	ctc := util.ConnectToClient{
-		//IP:   [4]byte(bufRec[:4]),
-		//ID:       cts.ID,
-		Port:     (uint16(bufRec[4]) << 8) | (uint16(bufRec[5])),
-		Password: bufRec[4+2+8:],
-	}
-	strIP := fmt.Sprintf("%d.%d.%d.%d", bufRec[0], bufRec[1], bufRec[2], bufRec[3])
-	for i := 0; i < len(ctc.IP); i++ {
-		ctc.IP[i] = bufRec[i]
-	}
-	for i := 0; i < 8; i++ {
-		ctc.ID = ctc.ID << 8
-		ctc.ID = ctc.ID | int64(bufRec[4+2+i])
-	}
+	bufIP := connInfo.IP
+	strIP := fmt.Sprintf("%d.%d.%d.%d", bufIP[0], bufIP[1], bufIP[2], bufIP[3])
 
-	log.Debugf("connect from: %s, to: %s : %d", addrLocal, strIP, ctc.Port)
+	log.Debugf("connect from: %s, to: %s : %d", addrLocal, strIP, connInfo.Port)
 
-	for i := 0; i < 1; i++ {
-		err := ConnectClient(proto, addrLocal, strIP, int(ctc.Port))
+	//
+	if connType == util.CONNECT_SRC {
+		err := ConnectClient(proto, addrLocal, strIP, int(connInfo.Port), false)
 		if err == nil {
 			log.Error(err)
-			break
 		}
-		time.Sleep(3 * time.Second)
+	} else if connType == util.CONNECT_DST {
+		err := ConnectClient(proto, addrLocal, strIP, int(connInfo.Port), true)
+		if err == nil {
+			log.Error(err)
+		}
 	}
 }
 
@@ -136,15 +130,23 @@ func ConnectServer(proto string, addr string, addrTo string, portTo int) (connRe
 
 			//Client通知Server需要向某个ID发起连接：C-->S
 			//Server 通知 被连接Client，有Client想要连接你，请尝试"铺路"：S-->C
-			if typeBody == util.CONNECT {
-				//				//关闭和服务器的连接
-				//				chEnd <- true
-				//				(*conn).Close()
+			if typeBody == util.CONNECT_SRC || typeBody == util.CONNECT_DST {
 
-				doP2PConnect(bufRec, lenBody, proto, (*conn).LocalAddr().String())
+				connInfo := util.ConnectToClient{}
+				buffer := bytes.NewBuffer(bufRec)
+				if err := binary.Read(buffer, binary.BigEndian, &connInfo); err != nil {
+					log.Error(err)
+					continue
+				}
 
-				return
-				//continue
+				doP2PConnect(&connInfo, lenBody, proto, (*conn).LocalAddr().String(), typeBody)
+
+				if typeBody == util.CONNECT_DST {
+					if err := sendConnect(conn, connInfo.ID, ClienID, util.CONNECT_DST); err != nil {
+						log.Debug(err)
+					}
+					continue
+				}
 			}
 
 			//通知Server，Client需要获取自己的ID：C-->S
@@ -198,7 +200,7 @@ func DialTimeout(network, localAddr, address string, timeout time.Duration) (net
 	}
 	return d.Dial(network, address)
 }
-func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet error) {
+func ConnectClient(proto string, addr string, addrTo string, portTo int, toread bool) (errRet error) {
 	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d", proto, addr, addrTo, portTo)
 
 	if false {
@@ -230,8 +232,10 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet
 		return
 	}
 	log.Debugf("connected,RemoteAddr:%s,Local:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
-
 	defer (*conn).Close()
+	if toread {
+		return
+	}
 
 	bufRec := make([]byte, 256)
 	_ = bufRec
@@ -293,28 +297,22 @@ func ConnectClient(proto string, addr string, addrTo string, portTo int) (errRet
 	}
 }
 
-func sendConnect(conn *net.Conn, idFrom, idTo int64) (errRet error) {
-	bufSend := make([]byte, 0, 32)
+func sendConnect(conn *net.Conn, idFrom, idTo int64, connType int8) (errRet error) {
 	//|idFrom:8 Byte|--|idTo:8 Byte|--|PasswordLen: Byte|---|Password:PasswordLen Byte|
-
-	x := uint(56)
-	for i := 0; i < 8; i++ {
-		b := byte((idFrom >> x) & 0xff)
-		bufSend = append(bufSend, b)
-		x -= 8
+	connInfo := util.CreateConn{
+		IDFrom: idFrom,
+		IDTo:   idTo,
+		//Password: [12]byte{"password-test"},
 	}
-	x = 56
-	for i := 8; i < 16; i++ {
-		b := byte((idTo >> x) & 0xff)
-		bufSend = append(bufSend, b)
-		x -= 8
+	copy(connInfo.Password[:], []byte("password-test"))
+	var buffer bytes.Buffer
+	if err := binary.Write(&buffer, binary.BigEndian, connInfo); err != nil {
+		log.Error(err)
+		return
 	}
-	bufSend = append(bufSend, byte(int8(len("password-test"))))
-	bufSend = append(bufSend, []byte("password-test")...)
+	log.Infof("SendToServer,idFrom:%d,idTo:%d", idFrom, idTo)
 
-	log.Infof("SendToServer,idFrom:%d,idTo:%s", idFrom, idTo)
-	//这里可以连接8088端口，，，aux
-	return util.SendWithLock(lockSend, conn, bufSend, util.CONNECT)
+	return util.SendWithLock(lockSend, conn, buffer.Bytes(), connType)
 }
 
 func main() {
@@ -327,6 +325,12 @@ func main() {
 		log.Error(err)
 	}
 	defer (*conn).Close()
+
+	//连接AUX，以确定CLient NAT类型
+	if err := SendConnectAUX(util.CfgNet.Proto, (*conn).LocalAddr().String(), util.CfgNet.ServerIP, 8088); err != nil {
+		log.Debug(err)
+		return
+	}
 
 	{
 		//log.Debug("Listen:", util.CfgNet.Proto, ",", util.CfgNet.Addr)
@@ -350,31 +354,19 @@ func main() {
 			x = false
 			id, err := strconv.ParseInt(params[1], 10, 64)
 			if err != nil {
+				log.Error(err)
 				continue
 			}
-			//			if err := sendConnect(conn, ClienID, id); err != nil {
-			//				return
-			//			}
-
-			if err := ConnectServerAndSendConnect(util.CfgNet.Proto, (*conn).LocalAddr().String(), util.CfgNet.ServerIP, 8088, ClienID, id); err != nil {
-				log.Debug(err)
+			if err := sendConnect(conn, ClienID, id, util.CONNECT_SRC); err != nil {
+				return
 			}
 
-			//SendSYNPackage
 		case "to":
-			x = true
-			id, err := strconv.ParseInt(params[1], 10, 64)
-			if err != nil {
-				continue
-			}
-			if err := ConnectServerAndSendConnect(util.CfgNet.Proto, (*conn).LocalAddr().String(), util.CfgNet.ServerIP, 8088, ClienID, id); err != nil {
-				log.Debug(err)
-			}
 		}
 	}
 }
 
-func ConnectServerAndSendConnect(proto string, addr string, addrTo string, portTo int, idFrom, idTo int64) (errRet error) {
+func SendConnectAUX(proto string, addr string, addrTo string, portTo int) (errRet error) {
 	log.Debugf("proto:%s, addr:%s, addrTo:%s, portTo:%d", proto, addr, addrTo, portTo)
 
 	socket, err := util.Socket(proto, addr)
@@ -391,28 +383,14 @@ func ConnectServerAndSendConnect(proto string, addr string, addrTo string, portT
 	}
 	log.Debugf("Server Aux conneted, RemoteAddr:%s, LocalAddr:%s", (*conn).RemoteAddr().String(), (*conn).LocalAddr().String())
 
-	//
-	bufSend := make([]byte, 0, 32)
-	//|idFrom:8 Byte|--|idTo:8 Byte|--|PasswordLen: Byte|---|Password:PasswordLen Byte|
-
-	x := uint(56)
-	for i := 0; i < 8; i++ {
-		b := byte((idFrom >> x) & 0xff)
-		bufSend = append(bufSend, b)
-		x -= 8
+	var buffer bytes.Buffer
+	if err := binary.Write(&buffer, binary.BigEndian, ClienID); err != nil {
+		log.Error(err)
+		return
 	}
-	x = 56
-	for i := 8; i < 16; i++ {
-		b := byte((idTo >> x) & 0xff)
-		bufSend = append(bufSend, b)
-		x -= 8
-	}
-	bufSend = append(bufSend, byte(int8(len("password-test"))))
-	bufSend = append(bufSend, []byte("password-test")...)
-
-	log.Infof("SendToServer,idFrom:%d,idTo:%s", idFrom, idTo)
+	log.Infof("SendAUX ToServer :8088")
 	//这里可以连接8088端口，，，aux
-	errRet = util.Send(conn, bufSend, util.CONNECT)
+	errRet = util.Send(conn, buffer.Bytes(), util.CONNECT_AUX)
 
 	(*conn).Close()
 	return
